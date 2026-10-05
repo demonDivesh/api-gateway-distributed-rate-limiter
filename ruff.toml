@@ -1,0 +1,11 @@
+# Shared Ruff config for services/, scripts/ and load_test/ (gateway/ has its own in pyproject.toml).
+line-length = 100
+target-version = "py314"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "C4", "SIM"]
+ignore = ["S101", "S105", "S106", "B008", "E501", "SIM117"]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S", "B"]
+"scripts/**" = ["S"]

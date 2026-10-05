@@ -1,0 +1,33 @@
+[project]
+name = "api-gateway"
+version = "1.0.0"
+description = "API Gateway & Distributed Rate Limiter"
+requires-python = ">=3.14,<3.15"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "C4", "SIM"]
+ignore = ["S101", "S105", "S106", "B008", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+
+[tool.mypy]
+python_version = "3.14"
+plugins = []
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = false
+warn_return_any = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests/unit", "tests/integration"]
+pythonpath = ["."]
+markers = ["load: load/performance tests (excluded by default)"]
+filterwarnings = ["ignore::DeprecationWarning"]

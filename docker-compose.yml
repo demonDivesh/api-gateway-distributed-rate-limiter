@@ -1,0 +1,128 @@
+# API Gateway & Distributed Rate Limiter - local/production-style stack.
+#   cp .env.example .env   (then edit secrets)   &&   docker compose up --build
+# Only the gateway (8000) and dashboard (3000) are published. Databases, Redis and the
+# backend services are reachable only on the internal network.
+
+x-service-env: &service-env
+  INTERNAL_SECRET: ${INTERNAL_SECRET:?set INTERNAL_SECRET in .env}
+  SERVICE_TOKEN: ${SERVICE_TOKEN:?set SERVICE_TOKEN in .env}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: gateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gateway} -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  service-a-1: &service-a
+    build: ./services/service_a
+    environment:
+      <<: *service-env
+      SERVICE_NAME: service-a
+      INSTANCE_ID: service-a-1
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD}@postgres:5432/service_a
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+    networks:
+      backend:
+        aliases: [service-a]   # Docker DNS load-balances service-to-service calls across replicas
+
+  service-a-2:
+    <<: *service-a
+    environment:
+      <<: *service-env
+      SERVICE_NAME: service-a
+      INSTANCE_ID: service-a-2
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD}@postgres:5432/service_a
+
+  service-b:
+    build: ./services/service_b
+    environment:
+      <<: *service-env
+      SERVICE_NAME: service-b
+      INSTANCE_ID: service-b-1
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD}@postgres:5432/service_b
+      CATALOG_URL: http://service-a:8000
+    depends_on:
+      postgres: {condition: service_healthy}
+      service-a-1: {condition: service_healthy}
+    restart: unless-stopped
+    networks: [backend]
+
+  gateway:
+    build: ./gateway
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      INTERNAL_SECRET: ${INTERNAL_SECRET}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD}@postgres:5432/gateway
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_A_URLS: http://service-a-1:8000,http://service-a-2:8000
+      SERVICE_B_URLS: http://service-b:8000
+      RATE_LIMIT_ALGORITHM: ${RATE_LIMIT_ALGORITHM:-sliding_window}
+      RATE_LIMIT_ANONYMOUS_PER_MINUTE: ${RATE_LIMIT_ANONYMOUS_PER_MINUTE:-30}
+      RATE_LIMIT_USER_PER_MINUTE: ${RATE_LIMIT_USER_PER_MINUTE:-120}
+      RATE_LIMIT_ADMIN_PER_MINUTE: ${RATE_LIMIT_ADMIN_PER_MINUTE:-600}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-10}
+      LOAD_BALANCER_STRATEGY: ${LOAD_BALANCER_STRATEGY:-round_robin}
+      TRUST_FORWARDED_FOR: ${TRUST_FORWARDED_FOR:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      service-a-1: {condition: service_healthy}
+      service-a-2: {condition: service_healthy}
+      service-b: {condition: service_healthy}
+    restart: unless-stopped
+    networks: [backend, edge]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      gateway: {condition: service_healthy}
+    restart: unless-stopped
+    networks: [edge]
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  backend:
+    internal: true   # no direct internet or host access to databases/services
+  edge:
